@@ -34,11 +34,6 @@ git submodule update
 pixi install
 pixi shell
 
-# Install our custom OpenSpiel (with fixes fixes for PTTT and DH3 and the addition of abrupt PTTT) (our default is python = 3.11)
-# If your system isn't linux or you're not on python 3.11, choose the variant for your system (https://github.com/nathanlct/open_spiel/releases)
-pip uninstall open_spiel -y
-pip install https://github.com/nathanlct/open_spiel/releases/download/v1.pttt/open_spiel-1.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-
 # Lastly, install the other requirements
 pip install -r requirements.txt
 ```
