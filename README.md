@@ -98,3 +98,12 @@ The following games are also available to play against our RL agents in this [on
 **Dark:** The opponent's moves are hidden. Selecting an occupied cell reveals it, and the player's turn continues.
 
 **Abrupt DH3:** In the abrupt variant, if a player's move reveals an opponent's symbol, their turn ends.
+
+## Installing as a library
+
+`pip install -e .` or `uv pip install -e .` or whatever
+
+then
+
+`from iig_rl_benchmark import ppo`
+
