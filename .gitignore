@@ -10,3 +10,5 @@ pixi.lock
 **/*.npy
 local/
 results/
+*.egg-info
+outputs/
