@@ -31,7 +31,7 @@ from torch.distributions.categorical import Categorical
 
 from open_spiel.python.rl_agent import StepOutput
 
-from utils import log_to_csv
+from iig_rl_benchmark.utils import log_to_csv
 
 INVALID_ACTION_PENALTY = -1e9
 
@@ -56,7 +56,7 @@ class CategoricalMasked(Categorical):
 class PPOAgent(nn.Module):
     """A PPO agent module."""
 
-    def __init__(self, num_actions, observation_shape, device):
+    def __init__(self, num_actions, observation_shape, device, layer_init=layer_init):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(observation_shape).prod(), 512)),
