@@ -56,25 +56,25 @@ class CategoricalMasked(Categorical):
 class PPOAgent(nn.Module):
     """A PPO agent module."""
 
-    def __init__(self, num_actions, observation_shape, device, layer_init=layer_init):
+    def __init__(self, num_actions, observation_shape, device, layer_init=layer_init, hidden_size=512):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(observation_shape).prod(), 512)),
+            layer_init(nn.Linear(np.array(observation_shape).prod(), hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, 512)),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, 512)),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, 1), std=1.0),
+            layer_init(nn.Linear(hidden_size, 1), std=1.0),
         )
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(observation_shape).prod(), 512)),
+            layer_init(nn.Linear(np.array(observation_shape).prod(), hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, 512)),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, 512)),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(512, num_actions), std=0.01),
+            layer_init(nn.Linear(hidden_size, num_actions), std=0.01),
         )
         self.device = device
         self.num_actions = num_actions

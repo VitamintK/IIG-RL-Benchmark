@@ -25,7 +25,7 @@ from open_spiel.python import rl_environment
 # from open_spiel.python.algorithms import dqn
 from open_spiel.python.pytorch import dqn
 from open_spiel.python.pytorch import policy_gradient
-from algorithms.ppo import ppo_wrapper
+from iig_rl_benchmark.algorithms.ppo import ppo_wrapper
 import copy
 # from open_spiel.python.algorithms import policy_gradient
 

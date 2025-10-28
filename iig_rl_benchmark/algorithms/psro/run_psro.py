@@ -38,12 +38,12 @@ from open_spiel.python.algorithms import exploitability
 from open_spiel.python.algorithms import get_all_states
 from open_spiel.python.algorithms import policy_aggregator
 from open_spiel.python.algorithms.psro_v2 import best_response_oracle
-from algorithms.psro import psro
-from algorithms.psro import rl_oracle
+from iig_rl_benchmark.algorithms.psro import psro
+from iig_rl_benchmark.algorithms.psro import rl_oracle
 from open_spiel.python import rl_agent
-from algorithms.ppo.ppo import PPOAgent
+from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 
-from algorithms.psro import rl_policy
+from iig_rl_benchmark.algorithms.psro import rl_policy
 from open_spiel.python.algorithms.psro_v2 import strategy_selectors
 import argparse
 import torch
@@ -145,21 +145,21 @@ class RunPSRO:
         agent_kwargs = {
             "info_state_size": info_state_size,
             "num_actions": num_actions,
-            "steps_per_batch": self.args.inner_rl_ppo_steps_per_batch,
-            "num_minibatches": self.args.inner_rl_ppo_num_minibatches,
-            "update_epochs": self.args.inner_rl_ppo_update_epochs,
-            "learning_rate": self.args.inner_rl_ppo_learning_rate,
-            "gae": self.args.inner_rl_ppo_gae,
-            "gamma": self.args.inner_rl_ppo_gamma,
-            "gae_lambda": self.args.inner_rl_ppo_gae_lambda,
-            "normalize_advantages": self.args.inner_rl_ppo_normalize_advantages,
-            "clip_coef": self.args.inner_rl_ppo_clip_coef,
-            "clip_vloss": self.args.inner_rl_ppo_clip_vloss,
-            "entropy_coef": self.args.inner_rl_ppo_entropy_coef,
-            "value_coef": self.args.inner_rl_ppo_value_coef,
-            "max_grad_norm": self.args.inner_rl_ppo_max_grad_norm,
-            "target_kl": self.args.inner_rl_ppo_target_kl,
-            "anneal_lr": self.args.inner_rl_ppo_anneal_lr,
+            "steps_per_batch": self.args.inner_rl_agent.num_steps,
+            "num_minibatches": self.args.inner_rl_agent.num_minibatches,
+            "update_epochs": self.args.inner_rl_agent.update_epochs,
+            "learning_rate": self.args.inner_rl_agent.learning_rate,
+            "gae": self.args.inner_rl_agent.gae,
+            "gamma": self.args.inner_rl_agent.gamma,
+            "gae_lambda": self.args.inner_rl_agent.gae_lambda,
+            "normalize_advantages": self.args.inner_rl_agent.norm_adv,
+            "clip_coef": self.args.inner_rl_agent.clip_coef,
+            "clip_vloss": self.args.inner_rl_agent.clip_vloss,
+            "entropy_coef": self.args.inner_rl_agent.ent_coef,
+            "value_coef": self.args.inner_rl_agent.vf_coef,
+            "max_grad_norm": self.args.inner_rl_agent.max_grad_norm,
+            "target_kl": self.args.inner_rl_agent.target_kl,
+            "anneal_lr": self.args.inner_rl_agent.anneal_lr,
             "use_wandb": False,
             "agent_fn": PPOAgent,
             "oracle_type": "ppo",
