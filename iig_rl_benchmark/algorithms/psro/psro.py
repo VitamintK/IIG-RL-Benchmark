@@ -38,7 +38,7 @@ import itertools
 import numpy as np
 
 from open_spiel.python import policy
-from algorithms.psro import abstract_meta_trainer
+from iig_rl_benchmark.algorithms.psro import abstract_meta_trainer
 from open_spiel.python.algorithms.psro_v2  import strategy_selectors
 from open_spiel.python.algorithms.psro_v2  import utils
 

@@ -21,7 +21,7 @@ import numpy as np
 
 from open_spiel.python.algorithms.psro_v2  import optimization_oracle
 from open_spiel.python.algorithms.psro_v2  import utils
-from algorithms.ppo import ppo_wrapper
+from iig_rl_benchmark.algorithms.ppo import ppo_wrapper
 
 
 def update_episodes_per_oracles(episodes_per_oracle, played_policies_indexes):

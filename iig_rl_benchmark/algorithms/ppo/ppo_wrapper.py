@@ -2,7 +2,7 @@ import collections
 import torch
 import copy
 from open_spiel.python import rl_agent
-from algorithms.ppo.ppo import PPO
+from iig_rl_benchmark.algorithms.ppo.ppo import PPO
 from open_spiel.python.rl_environment import TimeStep
 
 Transition = collections.namedtuple(
