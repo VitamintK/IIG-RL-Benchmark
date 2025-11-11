@@ -194,6 +194,7 @@ class PPO(nn.Module):
         gae=True,
         gamma=0.99,
         gae_lambda=0.95,
+        hidden_size=512,
         normalize_advantages=True,
         clip_coef=0.2,
         clip_vloss=True,
@@ -237,7 +238,7 @@ class PPO(nn.Module):
         self.target_kl = target_kl
 
         # Initialize networks
-        self.network = agent_fn(self.num_actions, self.input_shape, device).to(device)
+        self.network = agent_fn(self.num_actions, self.input_shape, device, hidden_size=hidden_size).to(device)
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
 
         # Initialize training buffers

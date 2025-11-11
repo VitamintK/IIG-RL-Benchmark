@@ -152,6 +152,7 @@ class RunPSRO:
             "gae": self.args.inner_rl_agent.gae,
             "gamma": self.args.inner_rl_agent.gamma,
             "gae_lambda": self.args.inner_rl_agent.gae_lambda,
+            "hidden_size": self.args.inner_rl_agent.hidden_size,
             "normalize_advantages": self.args.inner_rl_agent.norm_adv,
             "clip_coef": self.args.inner_rl_agent.clip_coef,
             "clip_vloss": self.args.inner_rl_agent.clip_vloss,
@@ -303,6 +304,9 @@ class RunPSRO:
                 expl_check_step_count = 0
 
             expl_check_step_count += self.total_steps[-1] - self.total_steps[-2]
+            self.save_psro_policies(
+                g_psro_solver, self.meta_args.experiment_dir, gpsro_iteration + 1
+            )
             gpsro_iteration += 1
 
         # self.policies = policies
