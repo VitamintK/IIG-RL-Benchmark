@@ -623,12 +623,10 @@ class PPO(nn.Module):
 
     def save(self, path):
         """Saves the actor weights to path"""
-        # torch.save(self.network.actor.state_dict(), path)
         self.network.save(path)
 
     def load(self, path):
         """Loads weights from actor checkpoint"""
-        # self.network.actor.load_state_dict(torch.load(path))
         self.network.load(path)
 
     def anneal_learning_rate(self, update, num_total_updates):

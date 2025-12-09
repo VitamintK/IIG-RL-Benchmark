@@ -420,12 +420,6 @@ class RunPSRO:
 
             expl_check_step_count += self.total_steps[-1] - self.total_steps[-2]
             print("Number of policies: ", [len(p) for p in g_psro_solver._policies])
-            # if self.is_neupl:
-            #     for i in range(g_psro_solver._num_active_policies[0]):
-            #         self.save_psro_policies(
-            #             g_psro_solver, self.meta_args.experiment_dir, ckpt_idx=i, policy_idx=i
-            #         )
-            # else:
             self.save_psro_policies(
                 g_psro_solver, self.meta_args.experiment_dir, gpsro_iteration + 1
             )
