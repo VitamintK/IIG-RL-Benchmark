@@ -27,6 +27,8 @@ from open_spiel.python.pytorch import dqn
 from open_spiel.python.pytorch import policy_gradient
 from iig_rl_benchmark.algorithms.ppo import ppo_wrapper
 import copy
+
+from utils import UniformRandomAgent
 # from open_spiel.python.algorithms import policy_gradient
 
 
@@ -109,6 +111,8 @@ def rl_policy_factory(rl_class):
             # pylint: enable=protected-access
 
             p = self._policy.step(time_step, is_evaluation=True).probs
+            if hasattr(p, "detach"):
+                p = p.detach().cpu().numpy()
             prob_dict = {action: p[action] for action in legal_actions}
             return prob_dict
 
@@ -172,6 +176,7 @@ def rl_policy_factory(rl_class):
 PGPolicy = rl_policy_factory(policy_gradient.PolicyGradient)
 DQNPolicy = rl_policy_factory(dqn.DQN)
 PPOPolicy = rl_policy_factory(ppo_wrapper.PPOWrapper)
+UniformRandomAgentPolicy = rl_policy_factory(UniformRandomAgent)
 
 import torch
 from open_spiel.python.pytorch.dqn import DQN

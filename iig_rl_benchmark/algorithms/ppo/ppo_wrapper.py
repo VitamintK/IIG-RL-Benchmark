@@ -98,8 +98,8 @@ class PPOWrapper(rl_agent.AbstractAgent):
             with torch.no_grad():
                 for layer in critic:
                     if hasattr(layer, "weight"):
-                        layer.weight *= 1 + sigma * torch.randn(layer.weight.shape)
+                        layer.weight *= 1 + sigma * torch.randn(layer.weight.shape, device=layer.weight.device)
                 for layer in actor:
                     if hasattr(layer, "weight"):
-                        layer.weight *= 1 + sigma * torch.randn(layer.weight.shape)
+                        layer.weight *= 1 + sigma * torch.randn(layer.weight.shape, device=layer.weight.device)
         return copied_object

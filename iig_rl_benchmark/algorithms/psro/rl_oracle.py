@@ -81,6 +81,7 @@ class RLOracle(optimization_oracle.AbstractOracle):
         best_response_kwargs,
         number_training_episodes=1e3,
         self_play_proportion=0.0,
+        mutate=False,
         **kwargs,
     ):
         """Init function for the RLOracle.
@@ -94,6 +95,7 @@ class RLOracle(optimization_oracle.AbstractOracle):
           self_play_proportion: Float, between 0 and 1. Defines the probability that
             a non-currently-training player will actually play (one of) its
             currently training strategy (Which will be trained as well).
+          mutate: if True, then mutate the policies. if False, copy the policies and return them.
           **kwargs: kwargs
         """
         self._env = env
@@ -104,6 +106,8 @@ class RLOracle(optimization_oracle.AbstractOracle):
         self._self_play_proportion = self_play_proportion
         self._number_training_episodes = number_training_episodes
         self._num_steps = 0
+
+        self._mutate = mutate
 
         super(RLOracle, self).__init__(**kwargs)
 
@@ -128,6 +132,8 @@ class RLOracle(optimization_oracle.AbstractOracle):
                 # that prevents policies from training, for all values of is_evaluation.
                 # Since all policies returned by the oracle are frozen before being
                 # returned, only currently-trained policies can effectively learn.
+                if isinstance(agents[0]._policy, ppo_wrapper.PPOWrapper) and isinstance(agents[1]._policy, ppo_wrapper.PPOWrapper):
+                    pass
                 agent_output = agents[player_id].step(
                     time_step, is_evaluation=is_evaluation
                 )
@@ -140,11 +146,12 @@ class RLOracle(optimization_oracle.AbstractOracle):
                     agents[player_id].post_step(time_step, is_evaluation)
 
         if not is_evaluation:
-            # PPO needs to step
-            if isinstance(agents[player_id]._policy, ppo_wrapper.PPOWrapper):
-                agents[1 - player_id].post_step(time_step, is_evaluation)
-            else:
-                for agent in agents:
+            # If the last player to act was the non-training PPO agent, then we need to post-step the training PPO agent.
+            for pid, agent in enumerate(agents):
+                if isinstance(agent._policy, ppo_wrapper.PPOWrapper):
+                    if pid == 1 - player_id:
+                        agent.post_step(time_step, is_evaluation)
+                else:
                     agent.step(time_step)
 
         return cumulative_rewards
@@ -153,10 +160,10 @@ class RLOracle(optimization_oracle.AbstractOracle):
         # The oracle has terminated when all policies have at least trained for
         # self._number_training_episodes. Given the stochastic nature of our
         # training, some policies may have more training episodes than that value.
-        return np.all(episodes_per_oracle.reshape(-1) > self._number_training_episodes)
+        return all(all(episodes > self._number_training_episodes for episodes in player_episodes) for player_episodes in episodes_per_oracle)
 
     def sample_policies_for_episode(
-        self, new_policies, training_parameters, episodes_per_oracle, strategy_sampler
+        self, new_policies, training_parameters, episodes_per_oracle, strategy_sampler, player=None,
     ):
         """Randomly samples a set of policies to run during the next episode.
 
@@ -181,8 +188,11 @@ class RLOracle(optimization_oracle.AbstractOracle):
         num_players = len(training_parameters)
 
         # Prioritizing players that haven't had as much training as the others.
-        episodes_per_player = [sum(episodes) for episodes in episodes_per_oracle]
-        chosen_player = random_count_weighted_choice(episodes_per_player)
+        if player is None:
+            episodes_per_player = [sum(episodes) for episodes in episodes_per_oracle]
+            chosen_player = random_count_weighted_choice(episodes_per_player)
+        else:
+            chosen_player = player
 
         # Uniformly choose among the sampled player.
         agent_chosen_ind = np.random.randint(0, len(training_parameters[chosen_player]))
@@ -203,6 +213,7 @@ class RLOracle(optimization_oracle.AbstractOracle):
         for player in range(num_players):
             if player == chosen_player:
                 episode_policies[player] = new_policy
+                new_policy.unfreeze()
                 assert not new_policy.is_frozen()
             else:
                 # Sample a bernoulli with parameter 'self_play_proportion' to determine
@@ -218,7 +229,9 @@ class RLOracle(optimization_oracle.AbstractOracle):
                     episode_policies[player] = self_play_agent
                     live_agents_player_index.append((player, agent_index))
                 else:
-                    assert episode_policies[player].is_frozen()
+                    if hasattr(episode_policies[player], 'is_frozen'):
+                        episode_policies[player].freeze()
+                        assert episode_policies[player].is_frozen()
 
         return episode_policies, live_agents_player_index
 
@@ -246,15 +259,19 @@ class RLOracle(optimization_oracle.AbstractOracle):
             new_pols = []
             for param in player_parameters:
                 current_pol = param["policy"]
-                if isinstance(current_pol, self._best_response_class):
-                    new_pol = current_pol.copy_with_noise(
-                        self._kwargs.get("sigma", 0.0)
-                    )
-                else:
-                    new_pol = self._best_response_class(
-                        self._env, player, **self._best_response_kwargs
-                    )
+                if self._mutate:
+                    new_pol = current_pol
                     new_pol.unfreeze()
+                else:
+                    if isinstance(current_pol, self._best_response_class):
+                        new_pol = current_pol.copy_with_noise(
+                            self._kwargs.get("sigma", 0.0)
+                        )
+                    else:
+                        new_pol = self._best_response_class(
+                            self._env, player, **self._best_response_kwargs
+                        )
+                        new_pol.unfreeze()
                 new_pols.append(new_pol)
             new_policies.append(new_pols)
         return new_policies
@@ -264,6 +281,7 @@ class RLOracle(optimization_oracle.AbstractOracle):
         game,
         training_parameters,
         strategy_sampler=utils.sample_strategy,
+        player=None,
         **oracle_specific_execution_kwargs,
     ):
         """Call method for oracle, returns best responses against a set of policies.
@@ -295,14 +313,14 @@ class RLOracle(optimization_oracle.AbstractOracle):
             [0 for _ in range(len(player_params))]
             for player_params in training_parameters
         ]
-        episodes_per_oracle = np.array(episodes_per_oracle)
+        # episodes_per_oracle = np.array(episodes_per_oracle)
 
         new_policies = self.generate_new_policies(training_parameters)
 
         # TODO(author4): Look into multithreading.
         while not self._has_terminated(episodes_per_oracle):
             agents, indexes = self.sample_policies_for_episode(
-                new_policies, training_parameters, episodes_per_oracle, strategy_sampler
+                new_policies, training_parameters, episodes_per_oracle, strategy_sampler, player
             )
             self._rollout(game, agents, **oracle_specific_execution_kwargs)
             episodes_per_oracle = update_episodes_per_oracles(

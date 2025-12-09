@@ -210,13 +210,16 @@ class AbstractMetaTrainer(object):
         self.update_meta_strategies()  # Compute meta strategy (e.g. Nash)
         meta_strategy_time = time()
         print(f"Meta strategy train time: {meta_strategy_time - empirical_time}")
-        print("Meta Strategy 0: ", self._meta_strategy_probabilities[0])
-        print("Meta Strategy 1: ", self._meta_strategy_probabilities[1])
+        # print("Meta Strategy 0: ", self._meta_strategy_probabilities[0])
+        # print("Meta Strategy 1: ", self._meta_strategy_probabilities[1])
+        # print("Meta Strategies: ", self._meta_strategy_probabilities)
 
     def update_meta_strategies(self):
+        print("Updating meta strategies")
         self._meta_strategy_probabilities = self._meta_strategy_method(self)
         if self.symmetric_game:
             self._meta_strategy_probabilities = [self._meta_strategy_probabilities[0]]
+        print("Done updating meta strategies")
 
     def update_agents(self):
         return NotImplementedError("update_agents not implemented.")
