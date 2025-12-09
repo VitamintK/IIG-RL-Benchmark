@@ -38,10 +38,10 @@ from open_spiel.python.algorithms import exploitability
 from open_spiel.python.algorithms import get_all_states
 from open_spiel.python.algorithms import policy_aggregator
 from open_spiel.python.algorithms.psro_v2 import best_response_oracle
-from iig_rl_benchmark.algorithms.psro import psro
+from iig_rl_benchmark.algorithms.psro import psro, neupl
 from iig_rl_benchmark.algorithms.psro import rl_oracle
 from open_spiel.python import rl_agent
-from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
+from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent, PPOConditionedOnPolicyRepresentationAgent
 
 from iig_rl_benchmark.algorithms.psro import rl_policy
 from open_spiel.python.algorithms.psro_v2 import strategy_selectors
@@ -49,6 +49,9 @@ import argparse
 import torch
 from torch.distributions import Categorical
 import os
+
+# from utils import UniformRandomAgent
+
 
 
 class PSRORLAgent(rl_agent.AbstractAgent):
@@ -108,11 +111,12 @@ class PSRORLAgent(rl_agent.AbstractAgent):
 
 
 class RunPSRO:
-    def __init__(self, args, game, expl_callback=None):
+    def __init__(self, args, game, expl_callback=None, is_neupl=False):
         self.args = args.algorithm
         self.meta_args = args
         self.game = game
         self.expl_callback = expl_callback
+        self.is_neupl = is_neupl
 
     def run(self):
         # game = pyspiel.load_game_as_turn_based(self.args.game)
@@ -134,6 +138,18 @@ class RunPSRO:
             raise ValueError(f"Oracle type {self.args.oracle_type} not recognized.")
 
         self.gpsro_looper(env, oracle, agents, args=self.args)
+    
+    def run_neupl(self):
+        env = rl_environment.Environment(self.game)
+        self.num_actions = env.action_spec()["num_actions"]
+        self.info_state_size = env.observation_spec()["info_state"][0]
+
+        if self.args.oracle_type == "ppo":
+            oracle, agents = self.init_neupl_ppo_responder(env)
+        else:
+            raise ValueError(f"Oracle type {self.args.oracle_type} not recognized.")
+        self.gpsro_looper(env, oracle, agents, args=self.args)
+
 
     def init_ppo_responder(self, env):
         """Initializes the Policy Gradient-based responder and agents."""
@@ -164,6 +180,7 @@ class RunPSRO:
             "use_wandb": False,
             "agent_fn": PPOAgent,
             "oracle_type": "ppo",
+            "device": self.args.inner_rl_agent.device,
         }
         oracle = rl_oracle.RLOracle(
             env,
@@ -182,6 +199,67 @@ class RunPSRO:
         ]
         for agent in agents:
             agent.freeze()
+        return oracle, agents
+
+    def init_neupl_ppo_responder(self, env):
+        """Initializes the Policy Gradient-based responder and agents."""
+        info_state_size = env.observation_spec()["info_state"][0]
+        num_actions = env.action_spec()["num_actions"]
+
+        agent_class = rl_policy.PPOPolicy
+
+        agent_kwargs = {
+            "info_state_size": info_state_size,
+            "num_actions": num_actions,
+            "steps_per_batch": self.args.inner_rl_agent.num_steps,
+            "num_minibatches": self.args.inner_rl_agent.num_minibatches,
+            "update_epochs": self.args.inner_rl_agent.update_epochs,
+            "learning_rate": self.args.inner_rl_agent.learning_rate,
+            "gae": self.args.inner_rl_agent.gae,
+            "gamma": self.args.inner_rl_agent.gamma,
+            "gae_lambda": self.args.inner_rl_agent.gae_lambda,
+            "hidden_size": self.args.inner_rl_agent.hidden_size,
+            "normalize_advantages": self.args.inner_rl_agent.norm_adv,
+            "clip_coef": self.args.inner_rl_agent.clip_coef,
+            "clip_vloss": self.args.inner_rl_agent.clip_vloss,
+            "entropy_coef": self.args.inner_rl_agent.ent_coef,
+            "value_coef": self.args.inner_rl_agent.vf_coef,
+            "max_grad_norm": self.args.inner_rl_agent.max_grad_norm,
+            "target_kl": self.args.inner_rl_agent.target_kl,
+            "anneal_lr": self.args.inner_rl_agent.anneal_lr,
+            "use_wandb": False,
+            "agent_fn": PPOConditionedOnPolicyRepresentationAgent,
+            "oracle_type": "ppo",
+            "neupl_ppo_kwargs": {
+                # "num_policies": self.args.total_num_policies,
+                # "policy_embedding_size": self.args.policy_embedding_size,
+                "num_policies": 100,
+                "policy_embedding_size": 64,
+            },
+            "device": self.meta_args.device,
+        }
+        oracle = rl_oracle.RLOracle(
+            env,
+            agent_class,
+            agent_kwargs,
+            number_training_episodes=self.args.number_training_episodes,
+            self_play_proportion=self.args.self_play_proportion,
+            mutate=True,
+            sigma=self.args.sigma,
+        )
+
+        agents = [
+            agent_class(  # pylint: disable=g-complex-comprehension
+                env, player_id, neupl_ppo_policy_index=0, **agent_kwargs
+            )
+            for player_id in range(2)
+        ]
+        agents = [[agent_class(env, player_id, network=agents[player_id]._policy.agent.network, neupl_ppo_policy_index=i, **agent_kwargs) for i in range(100)] for player_id in range(2)]
+        agents[0][0] = rl_policy.UniformRandomAgentPolicy(env, 0, num_actions=num_actions)
+        agents[1][0] = rl_policy.UniformRandomAgentPolicy(env, 1, num_actions=num_actions)
+        for player_agents in agents:
+            for agent in player_agents:
+                agent.unfreeze()
         return oracle, agents
 
     def init_br_responder(self, env):
@@ -236,19 +314,36 @@ class RunPSRO:
         training_strategy_selector = (
             args.training_strategy_selector or strategy_selectors.probabilistic
         )
+        print("training_strategy_selector", training_strategy_selector)
+        print(args)
 
-        g_psro_solver = psro.PSROSolver(
-            env.game,
-            oracle,
-            initial_policies=agents,
-            training_strategy_selector=training_strategy_selector,
-            rectifier=args.rectifier,
-            sims_per_entry=args.sims_per_entry,
-            number_policies_selected=args.number_policies_selected,
-            meta_strategy_method=args.meta_strategy_method,
-            sample_from_marginals=sample_from_marginals,
-            symmetric_game=args.symmetric_game,
-        )
+        if self.is_neupl:
+            g_psro_solver = neupl.NeuplSolver(
+                env.game,
+                oracle,
+                total_num_policies=100,
+                initial_policies=agents,
+                training_strategy_selector=training_strategy_selector,
+                rectifier=args.rectifier,
+                sims_per_entry=args.sims_per_entry,
+                number_policies_selected=args.number_policies_selected,
+                meta_strategy_method=args.meta_strategy_method,
+                sample_from_marginals=sample_from_marginals,
+                symmetric_game=args.symmetric_game,
+            )
+        else:
+            g_psro_solver = psro.PSROSolver(
+                env.game,
+                oracle,
+                initial_policies=agents,
+                training_strategy_selector=training_strategy_selector,
+                rectifier=args.rectifier,
+                sims_per_entry=args.sims_per_entry,
+                number_policies_selected=args.number_policies_selected,
+                meta_strategy_method=args.meta_strategy_method,
+                sample_from_marginals=sample_from_marginals,
+                symmetric_game=args.symmetric_game,
+            )
 
         start_time = time.time()
         self.total_steps = [0]
@@ -271,39 +366,66 @@ class RunPSRO:
                 f"fps: {(num_meta_game_steps + num_meta_game_steps) / (time.time() - start_time)}"
             )
 
+            if True:
+                aggregator = policy_aggregator.PolicyAggregator(env.game)
+                if self.is_neupl:
+                    aggr_policies = aggregator.aggregate(
+                        range(2), self.policies, self.meta_probabilities[-1])
+                    mg = meta_game
+                else:
+                    aggr_policies = aggregator.aggregate(
+                        range(2), self.policies, self.meta_probabilities)
+                    mg = meta_game
+                # for row in mg[0][:13]:
+                #     print('\t'.join([f"{x:.2f}" if not np.isnan(x) else "nan" for x in row[:18]]))
 
-            if self.total_steps[-1] > self.meta_args.max_steps:
-                expl_agents = self.wrap_rl_agent(
-                    self.meta_args.experiment_dir + f"/agent.pkl"
-                )
+                exploitabilities, expl_per_player = exploitability.nash_conv(
+                    env.game, aggr_policies, return_only_nash_conv=False)
 
-                if self.meta_args.compute_exploitability:
-                    models = [ag.get_model() for ag in expl_agents]
-                    action_selection = ["sto" if args.oracle_type == "ppo" else "det"] * 2
-                    self.expl_callback(
-                        models[0],
-                        models[1],
-                        self.total_steps[-1],
-                        action_selection=action_selection,
+                # _ = print_policy_analysis(policies, env.game, FLAGS.verbose)
+                # if FLAGS.verbose:
+                print("Exploitabilities : {}   {}".format(exploitabilities/2, expl_per_player))
+            else:
+
+                if self.total_steps[-1] > self.meta_args.max_steps:
+                    expl_agents = self.wrap_rl_agent(
+                        self.meta_args.experiment_dir + f"/agent.pkl"
                     )
-                break
-            if expl_check_step_count > self.meta_args.compute_exploitability_every and self.meta_args.compute_exploitability:
-                expl_agents = self.wrap_rl_agent(
-                    self.meta_args.experiment_dir
-                    + f"/agent.pkl"
-                )
-                if self.meta_args.compute_exploitability:
-                    models = [ag.get_model() for ag in expl_agents]
-                    action_selection = ["sto" if args.oracle_type == "ppo" else "det"] * 2
-                    self.expl_callback(
-                        models[0],
-                        models[1],
-                        self.total_steps[-1],
-                        action_selection=action_selection,
+
+                    if self.meta_args.compute_exploitability:
+                        models = [ag.get_model() for ag in expl_agents]
+                        action_selection = ["sto" if args.oracle_type == "ppo" else "det"] * 2
+                        self.expl_callback(
+                            models[0],
+                            models[1],
+                            self.total_steps[-1],
+                            action_selection=action_selection,
+                        )
+                    break
+                if expl_check_step_count > self.meta_args.compute_exploitability_every and self.meta_args.compute_exploitability:
+                    expl_agents = self.wrap_rl_agent(
+                        self.meta_args.experiment_dir
+                        + f"/agent.pkl"
                     )
-                expl_check_step_count = 0
+                    if self.meta_args.compute_exploitability:
+                        models = [ag.get_model() for ag in expl_agents]
+                        action_selection = ["sto" if args.oracle_type == "ppo" else "det"] * 2
+                        self.expl_callback(
+                            models[0],
+                            models[1],
+                            self.total_steps[-1],
+                            action_selection=action_selection,
+                        )
+                    expl_check_step_count = 0
 
             expl_check_step_count += self.total_steps[-1] - self.total_steps[-2]
+            print("Number of policies: ", [len(p) for p in g_psro_solver._policies])
+            # if self.is_neupl:
+            #     for i in range(g_psro_solver._num_active_policies[0]):
+            #         self.save_psro_policies(
+            #             g_psro_solver, self.meta_args.experiment_dir, ckpt_idx=i, policy_idx=i
+            #         )
+            # else:
             self.save_psro_policies(
                 g_psro_solver, self.meta_args.experiment_dir, gpsro_iteration + 1
             )
@@ -318,7 +440,9 @@ class RunPSRO:
     def current_step(self):
         return self.total_steps[-1]
 
-    def save_psro_policies(self, psro_solver, ckpt_dir, ckpt_idx):
+    def save_psro_policies(self, psro_solver, ckpt_dir, ckpt_idx, policy_idx=None):
+        if policy_idx is None:
+            policy_idx = -1
         policies = psro_solver._policies
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir)
@@ -326,12 +450,14 @@ class RunPSRO:
         player0s = policies[0]
         player1s = policies[1]
         # import pdb; pdb.set_trace()
-        player0s[-1]._policy.save(ckpt_dir + f"/policy0_ckpt{ckpt_idx}.pt")
-        player1s[-1]._policy.save(ckpt_dir + f"/policy1_ckpt{ckpt_idx}.pt")
+        if hasattr(player0s[policy_idx]._policy, 'save'):
+            player0s[policy_idx]._policy.save(ckpt_dir + f"/policy0_ckpt{ckpt_idx}.pt")
+        if hasattr(player1s[policy_idx]._policy, 'save'):
+            player1s[policy_idx]._policy.save(ckpt_dir + f"/policy1_ckpt{ckpt_idx}.pt")
         meta_game = psro_solver.get_meta_game()
         np.save(ckpt_dir + f"/meta_game_{ckpt_idx}.npy", meta_game)
         meta_strategies = psro_solver.get_meta_strategies()
-        np.save(ckpt_dir + f"/meta_strategies_{ckpt_idx}.npy", meta_strategies)
+        # np.save(ckpt_dir + f"/meta_strategies_{ckpt_idx}.npy", meta_strategies)
         return ckpt_dir, ckpt_dir + f"/meta_strategies_{ckpt_idx}.npy"
 
     def wrap_rl_agent(self, save_path=None):

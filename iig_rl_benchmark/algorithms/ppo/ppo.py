@@ -22,6 +22,7 @@ Currently only supports the single-agent case.
 """
 
 import time
+from typing import Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -100,6 +101,111 @@ class PPOAgent(nn.Module):
             self.critic(x),
             probs.probs,
         )
+    
+    def save(self, path):
+        torch.save(self.actor.state_dict(), path)
+
+    def load(self, path):
+        self.actor.load_state_dict(torch.load(path))
+
+class L2NormLayer(nn.Module):
+    def __init__(self, dim=-1, eps=1e-12):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+
+    def forward(self, x):
+        return torch.nn.functional.normalize(x, p=2, dim=self.dim, eps=self.eps)
+class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
+    """A PPO agent module that is conditioned on a policy representation."""
+
+    def __init__(self, num_actions, observation_shape, device, num_policies, policy_embedding_size,layer_init=layer_init, hidden_size=512):
+        super().__init__()
+        normalization_type: Literal['none', 'layer', 'l2'] = 'layer'
+        self.version = f'1_{normalization_type}'
+        self.num_policies = num_policies
+        if normalization_type == 'none':
+            normalization_layer = nn.Identity()
+        elif normalization_type == 'layer':
+            normalization_layer = nn.LayerNorm(policy_embedding_size, elementwise_affine=True)
+        elif normalization_type == 'l2':
+            normalization_layer = L2NormLayer(dim=1, eps=1e-12)
+        else:
+            raise ValueError(f"Invalid normalization type: {normalization_type}")
+        self.embedding_prenorm = nn.Embedding(num_policies, policy_embedding_size)
+        self.embedding_norm = normalization_layer
+        self.policy_representation_embedding = nn.Sequential(
+            self.embedding_prenorm,
+            self.embedding_norm,
+        )
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(np.array(observation_shape).prod() + policy_embedding_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, 1), std=1.0),
+        )
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(np.array(observation_shape).prod() + policy_embedding_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, num_actions), std=0.01),
+        )
+        self.device = device
+        self.num_actions = num_actions
+        self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
+
+    def get_value(self, x, policy_index):
+        # Expand policy_index to match batch size
+        batch_size = x.shape[0]
+        policy_index_expanded = policy_index.expand(batch_size)
+        return self.critic(torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1))
+
+    def get_action_and_value(self, x, policy_index=None, embedding=None,legal_actions_mask=None, action=None):
+        assert (policy_index is None) != (embedding is None), "Exactly one of policy_index or embedding must be provided"
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+
+        # Expand policy_index to match batch size
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        batch_size = x.shape[0]
+        if policy_index is not None:
+            policy_index_expanded = policy_index.expand(batch_size)
+            nn_input = torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1)
+        else:
+            embedding_expanded = embedding.expand(batch_size, -1)
+            nn_input = torch.cat([x, embedding_expanded], dim=1)
+
+        logits = self.actor(nn_input)
+        probs = CategoricalMasked(
+            logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
+        )
+        if action is None:
+            action = probs.sample()
+        return (
+            action,
+            probs.log_prob(action),
+            probs.entropy(),
+            self.critic(nn_input),
+            probs.probs,
+        )
+    
+    def save(self, path):
+        torch.save({'version': self.version, 'actor': self.actor.state_dict(), 'policy_representation_embedding': self.policy_representation_embedding.state_dict()}, path)
+
+    def load(self, path):
+        checkpoint = torch.load(path)
+        version = checkpoint.get('version', None)
+        if version is None or version != self.version:
+            raise ValueError(f"Version mismatch: {version} != {self.version}")
+        self.actor.load_state_dict(checkpoint['actor'])
+        self.policy_representation_embedding.load_state_dict(checkpoint['policy_representation_embedding'])
 
 
 class PPOAtariAgent(nn.Module):
@@ -203,11 +309,15 @@ class PPO(nn.Module):
         max_grad_norm=0.5,
         target_kl=None,
         device="cpu",
-        agent_fn=PPOAtariAgent,
+        agent_fn: Union[PPOAgent, PPOAtariAgent, PPOConditionedOnPolicyRepresentationAgent]=PPOAtariAgent,
+        neupl_ppo_kwargs: Optional[dict]=None,
+        neupl_ppo_policy_index: Optional[int]=None,
+        network: Optional[nn.Module]=None,
         log_file=None,
         **kwargs,
     ):
         super().__init__()
+        assert (agent_fn == PPOConditionedOnPolicyRepresentationAgent) == (neupl_ppo_policy_index is not None) == (neupl_ppo_kwargs is not None), "neupl_ppo_policy_index and neupl_ppo_kwargs must be provided if agent_fn is PPOConditionedOnPolicyRepresentationAgent"
 
         self.input_shape = (np.array(input_shape).prod(),)
         self.num_actions = num_actions
@@ -238,7 +348,12 @@ class PPO(nn.Module):
         self.target_kl = target_kl
 
         # Initialize networks
-        self.network = agent_fn(self.num_actions, self.input_shape, device, hidden_size=hidden_size).to(device)
+        if neupl_ppo_policy_index is not None:
+            self.neupl_ppo_policy_index = torch.tensor(neupl_ppo_policy_index).to(device).unsqueeze(0)
+        if network is None:
+            self.network = agent_fn(self.num_actions, self.input_shape, device, hidden_size=hidden_size, **(neupl_ppo_kwargs or {})).to(device)
+        else:
+            self.network = network
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
 
         # Initialize training buffers
@@ -264,10 +379,16 @@ class PPO(nn.Module):
         self.start_time = time.time()
 
     def get_value(self, x):
-        return self.network.get_value(x)
+        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
+            return self.network.get_value(x, self.neupl_ppo_policy_index)
+        else:
+            return self.network.get_value(x)
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
-        return self.network.get_action_and_value(x, legal_actions_mask, action)
+        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
+            return self.network.get_action_and_value(x, policy_index=self.neupl_ppo_policy_index, legal_actions_mask=legal_actions_mask, action=action)
+        else:
+            return self.network.get_action_and_value(x, legal_actions_mask, action)
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -502,11 +623,13 @@ class PPO(nn.Module):
 
     def save(self, path):
         """Saves the actor weights to path"""
-        torch.save(self.network.actor.state_dict(), path)
+        # torch.save(self.network.actor.state_dict(), path)
+        self.network.save(path)
 
     def load(self, path):
         """Loads weights from actor checkpoint"""
-        self.network.actor.load_state_dict(torch.load(path))
+        # self.network.actor.load_state_dict(torch.load(path))
+        self.network.load(path)
 
     def anneal_learning_rate(self, update, num_total_updates):
         # Annealing the rate
