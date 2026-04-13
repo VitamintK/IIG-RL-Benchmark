@@ -105,7 +105,14 @@ class PPOAgent(nn.Module):
             self.critic(obs_for_critic),
             probs.probs,
         )
-    
+
+    def get_action(self, x, legal_actions_mask=None):
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+        logits = self.actor(x)
+        probs = CategoricalMasked(logits=logits, masks=legal_actions_mask, mask_value=self.mask_value)
+        return probs.sample(), probs.probs
+
     def save(self, path):
         torch.save(self.actor.state_dict(), path)
 
@@ -308,6 +315,14 @@ class PPOAtariAgent(nn.Module):
             probs.probs,
         )
 
+    def get_action(self, x, legal_actions_mask=None):
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+        hidden = self.network(x / 255.0)
+        logits = self.actor(hidden)
+        probs = CategoricalMasked(logits=logits, masks=legal_actions_mask, mask_value=self.mask_value)
+        return probs.sample(), probs.probs
+
 
 def legal_actions_to_mask(legal_actions_list, num_actions):
     """Converts a list of legal actions to a mask.
@@ -500,6 +515,17 @@ class PPO(nn.Module):
         else:
             raise ValueError("Network is not a PPOConditionedOnPolicyRepresentationAgent")
 
+    def get_action(self, x, legal_actions_mask=None):
+        """Actor-only forward pass — no critic, no value. Use this during evaluation."""
+        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
+            assert (self.neupl_ppo_policy_index is not None) != (self.neupl_ppo_policy_embedding is not None)
+            if self.neupl_ppo_policy_index is not None:
+                return self.network.get_action(x, policy_index=self.neupl_ppo_policy_index, legal_actions_mask=legal_actions_mask)
+            else:
+                return self.network.get_action(x, embedding=self.neupl_ppo_policy_embedding, legal_actions_mask=legal_actions_mask)
+        else:
+            return self.network.get_action(x, legal_actions_mask=legal_actions_mask)
+
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
             with torch.no_grad():
@@ -521,9 +547,7 @@ class PPO(nn.Module):
                         ]
                     )
                 ).to(self.device)
-                action, _, _, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
+                action, _, _, probs = self.get_action(obs, legal_actions_mask=legal_actions_mask)
                 return [
                     StepOutput(action=a.item(), probs=p)
                     for (a, p) in zip(action, probs)

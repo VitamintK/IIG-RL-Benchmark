@@ -239,6 +239,7 @@ class RunPSRO:
                 "policy_embedding_size": 64,
             },
             "device": self.meta_args.device,
+            "use_joint_obs_for_critic": True,
         }
         oracle = rl_oracle.RLOracle(
             env,
