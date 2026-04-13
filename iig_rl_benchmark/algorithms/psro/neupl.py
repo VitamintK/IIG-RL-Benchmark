@@ -38,6 +38,7 @@ import itertools
 import numpy as np
 
 from open_spiel.python import policy
+import torch
 from iig_rl_benchmark.algorithms.psro import abstract_meta_trainer
 from open_spiel.python.algorithms.psro_v2  import strategy_selectors
 from open_spiel.python.algorithms.psro_v2  import utils
@@ -68,6 +69,7 @@ class NeuplSolver(abstract_meta_trainer.AbstractMetaTrainer):
         n_noisy_copies=0,
         alpha_noise=0.0,
         beta_noise=0.0,
+        use_randall_loss=False,
         **kwargs,
     ):
         """Initialize the neupl solver.
@@ -150,7 +152,7 @@ class NeuplSolver(abstract_meta_trainer.AbstractMetaTrainer):
 
         print("Sampling from marginals : {}".format(sample_from_marginals))
         self.sample_from_marginals = sample_from_marginals
-
+        self.use_randall_loss = use_randall_loss
 
         super(NeuplSolver, self).__init__(
             game,
@@ -162,11 +164,56 @@ class NeuplSolver(abstract_meta_trainer.AbstractMetaTrainer):
             **kwargs,
         )
 
+        if use_randall_loss:
+            self.randall_loss_optimizers = [
+                torch.optim.Adam(self._policies[0][1]._policy.agent.network.policy_representation_embedding.parameters(), lr=0.0006),
+                torch.optim.Adam(self._policies[1][1]._policy.agent.network.policy_representation_embedding.parameters(), lr=0.0006),
+            ]
+
 
     # def _make_policy(self, player, i):
     #     return 
     def iteration(self, *args, **kwargs):
         super(NeuplSolver, self).iteration(*args, **kwargs)
+        if self.use_randall_loss:
+            self.update_randall_loss()
+    
+    def update_randall_loss(self):
+        for it in range(101):
+            my_print = print if it % 10 == 0 else lambda *args, **kwargs: None
+            my_print('updating randall loss')
+            payoffs = torch.tensor(self._meta_games[0][:self._num_active_policies[0], :self._num_active_policies[1]])
+            inner_products = torch.zeros_like(payoffs)
+            for i in range(1, self._num_active_policies[0]):
+                for j in range(1, self._num_active_policies[1]):
+                    embeddings = [
+                        self._policies[0][i]._policy.agent.network.policy_representation_embedding(torch.tensor(i)),
+                        self._policies[1][j]._policy.agent.network.policy_representation_embedding(torch.tensor(j)),
+                    ]
+                    inner_products[i, j] = embeddings[0] @ embeddings[1]
+            randall_loss = torch.norm(payoffs[1:, 1:] - inner_products[1:, 1:])
+            my_print(f"Randall loss: {randall_loss}")
+            my_print(f"Before calling step. Embeddings:")
+            K = 5
+            KK = 5
+            for i in range(1, 4):
+                my_print(f"Policy {i} embedding: {self._policies[0][i]._policy.agent.network.policy_representation_embedding(torch.tensor(i))[:K]}")
+            for i in range(1, 4):
+                my_print(f"Policy {i} embedding: {self._policies[1][i]._policy.agent.network.policy_representation_embedding(torch.tensor(i))[:K]}")
+            my_print(payoffs[1:KK, 1:KK])
+            my_print(inner_products[1:KK, 1:KK])
+            my_print(payoffs[1:KK, 1:KK] - inner_products[1:KK, 1:KK])
+            self.randall_loss_optimizers[0].zero_grad()
+            self.randall_loss_optimizers[1].zero_grad()
+            randall_loss.backward()
+            self.randall_loss_optimizers[0].step()
+            self.randall_loss_optimizers[1].step()
+            my_print(f"After calling step. Embeddings:")
+            for i in range(1,4):
+                my_print(f"Policy {i} embedding: {self._policies[0][i]._policy.agent.network.policy_representation_embedding(torch.tensor(i))[:K]}")
+            for i in range(1,4):
+                my_print(f"Policy {i} embedding: {self._policies[1][i]._policy.agent.network.policy_representation_embedding(torch.tensor(i))[:K]}")
+
 
     def _initialize_policy(self, initial_policies):
         if self.symmetric_game:

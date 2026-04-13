@@ -57,10 +57,12 @@ class CategoricalMasked(Categorical):
 class PPOAgent(nn.Module):
     """A PPO agent module."""
 
-    def __init__(self, num_actions, observation_shape, device, layer_init=layer_init, hidden_size=512):
+    def __init__(self, num_actions, observation_shape, device, layer_init=layer_init, hidden_size=512, critic_observation_shape=None):
         super().__init__()
+        # Use separate observation shape for critic if provided (e.g., for joint observations)
+        critic_obs_size = np.array(critic_observation_shape).prod() if critic_observation_shape is not None else np.array(observation_shape).prod()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(observation_shape).prod(), hidden_size)),
+            layer_init(nn.Linear(critic_obs_size, hidden_size)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
@@ -81,13 +83,15 @@ class PPOAgent(nn.Module):
         self.num_actions = num_actions
         self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
 
-    def get_value(self, x):
-        return self.critic(x)
+    def get_value(self, x, critic_obs=None):
+        obs_for_critic = critic_obs if critic_obs is not None else x
+        return self.critic(obs_for_critic)
 
-    def get_action_and_value(self, x, legal_actions_mask=None, action=None):
+    def get_action_and_value(self, x, legal_actions_mask=None, action=None, critic_obs=None):
         if legal_actions_mask is None:
             legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
 
+        obs_for_critic = critic_obs if critic_obs is not None else x
         logits = self.actor(x)
         probs = CategoricalMasked(
             logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
@@ -98,7 +102,7 @@ class PPOAgent(nn.Module):
             action,
             probs.log_prob(action),
             probs.entropy(),
-            self.critic(x),
+            self.critic(obs_for_critic),
             probs.probs,
         )
     
@@ -119,7 +123,7 @@ class L2NormLayer(nn.Module):
 class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
     """A PPO agent module that is conditioned on a policy representation."""
 
-    def __init__(self, num_actions, observation_shape, device, num_policies, policy_embedding_size,layer_init=layer_init, hidden_size=512):
+    def __init__(self, num_actions, observation_shape, device, num_policies, policy_embedding_size, layer_init=layer_init, hidden_size=512, critic_observation_shape=None):
         super().__init__()
         normalization_type: Literal['none', 'layer', 'l2'] = 'layer'
         self.version = f'1_{normalization_type}'
@@ -138,8 +142,10 @@ class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
             self.embedding_prenorm,
             self.embedding_norm,
         )
+        # Use separate observation shape for critic if provided (e.g., for joint observations)
+        critic_obs_size = np.array(critic_observation_shape).prod() if critic_observation_shape is not None else np.array(observation_shape).prod()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(observation_shape).prod() + policy_embedding_size, hidden_size)),
+            layer_init(nn.Linear(critic_obs_size + policy_embedding_size, hidden_size)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh(),
@@ -160,13 +166,57 @@ class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
         self.num_actions = num_actions
         self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
 
-    def get_value(self, x, policy_index):
+    def get_value(self, x, policy_index=None, embedding=None, critic_obs=None):
+        assert (policy_index is None) != (embedding is None), "Exactly one of policy_index or embedding must be provided"
+        # Use critic_obs if provided, otherwise use x
+        obs_for_critic = critic_obs if critic_obs is not None else x
         # Expand policy_index to match batch size
-        batch_size = x.shape[0]
-        policy_index_expanded = policy_index.expand(batch_size)
-        return self.critic(torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1))
+        batch_size = obs_for_critic.shape[0]
+        if policy_index is not None:
+            policy_index_expanded = policy_index.expand(batch_size)
+            return self.critic(torch.cat([obs_for_critic, self.policy_representation_embedding(policy_index_expanded)], dim=1))
+        else:
+            embedding_expanded = embedding.expand(batch_size, -1)
+            return self.critic(torch.cat([obs_for_critic, embedding_expanded], dim=1))
 
-    def get_action_and_value(self, x, policy_index=None, embedding=None,legal_actions_mask=None, action=None):
+    def get_action_and_value(self, x, policy_index=None, embedding=None, legal_actions_mask=None, action=None, critic_obs=None):
+        assert (policy_index is None) != (embedding is None), "Exactly one of policy_index or embedding must be provided"
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+
+        # Use critic_obs if provided, otherwise use x
+        obs_for_critic = critic_obs if critic_obs is not None else x
+
+        # Expand policy_index to match batch size
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        if obs_for_critic.ndim == 1:
+            obs_for_critic = obs_for_critic.unsqueeze(0)
+        batch_size = x.shape[0]
+        if policy_index is not None:
+            policy_index_expanded = policy_index.expand(batch_size)
+            actor_input = torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1)
+            critic_input = torch.cat([obs_for_critic, self.policy_representation_embedding(policy_index_expanded)], dim=1)
+        else:
+            embedding_expanded = embedding.expand(batch_size, -1)
+            actor_input = torch.cat([x, embedding_expanded], dim=1)
+            critic_input = torch.cat([obs_for_critic, embedding_expanded], dim=1)
+
+        logits = self.actor(actor_input)
+        probs = CategoricalMasked(
+            logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
+        )
+        if action is None:
+            action = probs.sample()
+        return (
+            action,
+            probs.log_prob(action),
+            probs.entropy(),
+            self.critic(critic_input),
+            probs.probs,
+        )
+    
+    def get_action(self, x, policy_index=None, embedding=None, legal_actions_mask=None, action=None):
         assert (policy_index is None) != (embedding is None), "Exactly one of policy_index or embedding must be provided"
         if legal_actions_mask is None:
             legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
@@ -177,12 +227,12 @@ class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
         batch_size = x.shape[0]
         if policy_index is not None:
             policy_index_expanded = policy_index.expand(batch_size)
-            nn_input = torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1)
+            actor_input = torch.cat([x, self.policy_representation_embedding(policy_index_expanded)], dim=1)
         else:
             embedding_expanded = embedding.expand(batch_size, -1)
-            nn_input = torch.cat([x, embedding_expanded], dim=1)
+            actor_input = torch.cat([x, embedding_expanded], dim=1)
 
-        logits = self.actor(nn_input)
+        logits = self.actor(actor_input)
         probs = CategoricalMasked(
             logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
         )
@@ -192,7 +242,6 @@ class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
             action,
             probs.log_prob(action),
             probs.entropy(),
-            self.critic(nn_input),
             probs.probs,
         )
     
@@ -211,8 +260,9 @@ class PPOConditionedOnPolicyRepresentationAgent(nn.Module):
 class PPOAtariAgent(nn.Module):
     """A PPO Atari agent module."""
 
-    def __init__(self, num_actions, observation_shape, device):
+    def __init__(self, num_actions, observation_shape, device, hidden_size=512, critic_observation_shape=None):
         super(PPOAtariAgent, self).__init__()
+        # Note: critic_observation_shape is ignored for Atari agent (uses CNN)
         # Note: this network is intended for atari games, taken from
         # https://github.com/vwxyzjn/ppo-implementation-details/blob/main/ppo_atari.py
         self.network = nn.Sequential(
@@ -232,14 +282,17 @@ class PPOAtariAgent(nn.Module):
         self.device = device
         self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
 
-    def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
+    def get_value(self, x, critic_obs=None):
+        obs_for_critic = critic_obs if critic_obs is not None else x
+        return self.critic(self.network(obs_for_critic / 255.0))
 
-    def get_action_and_value(self, x, legal_actions_mask=None, action=None):
+    def get_action_and_value(self, x, legal_actions_mask=None, action=None, critic_obs=None):
         if legal_actions_mask is None:
             legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
 
+        obs_for_critic = critic_obs if critic_obs is not None else x
         hidden = self.network(x / 255.0)
+        critic_hidden = self.network(obs_for_critic / 255.0) if critic_obs is not None else hidden
         logits = self.actor(hidden)
         probs = CategoricalMasked(
             logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
@@ -251,7 +304,7 @@ class PPOAtariAgent(nn.Module):
             action,
             probs.log_prob(action),
             probs.entropy(),
-            self.critic(hidden),
+            self.critic(critic_hidden),
             probs.probs,
         )
 
@@ -312,18 +365,25 @@ class PPO(nn.Module):
         agent_fn: Union[PPOAgent, PPOAtariAgent, PPOConditionedOnPolicyRepresentationAgent]=PPOAtariAgent,
         neupl_ppo_kwargs: Optional[dict]=None,
         neupl_ppo_policy_index: Optional[int]=None,
+        neupl_ppo_policy_embedding: Optional[torch.Tensor]=None,
         network: Optional[nn.Module]=None,
         log_file=None,
+        use_joint_obs_for_critic=False,
+        optimizer_type: Literal["adam", "adamw"]="adam",
         **kwargs,
     ):
         super().__init__()
-        assert (agent_fn == PPOConditionedOnPolicyRepresentationAgent) == (neupl_ppo_policy_index is not None) == (neupl_ppo_kwargs is not None), "neupl_ppo_policy_index and neupl_ppo_kwargs must be provided if agent_fn is PPOConditionedOnPolicyRepresentationAgent"
+        embedding_xor_index_provided = (neupl_ppo_policy_index is not None) != (neupl_ppo_policy_embedding is not None)
+        assert (agent_fn == PPOConditionedOnPolicyRepresentationAgent) == embedding_xor_index_provided == (neupl_ppo_kwargs is not None), "(neupl_ppo_policy_index xor neupl_ppo_policy_embedding) and neupl_ppo_kwargs must be provided if agent_fn is PPOConditionedOnPolicyRepresentationAgent"
 
         self.input_shape = (np.array(input_shape).prod(),)
         self.num_actions = num_actions
         self.num_players = num_players
         self.device = device
         self.log_file = log_file
+        self.use_joint_obs_for_critic = use_joint_obs_for_critic
+        # Joint observation is concatenation of both players' observations
+        self.joint_obs_shape = (self.input_shape[0] * num_players,)
 
         # Training settings
         self.num_envs = num_envs
@@ -349,12 +409,25 @@ class PPO(nn.Module):
 
         # Initialize networks
         if neupl_ppo_policy_index is not None:
+            self.neupl_ppo_policy_embedding = None
             self.neupl_ppo_policy_index = torch.tensor(neupl_ppo_policy_index).to(device).unsqueeze(0)
+        if neupl_ppo_policy_embedding is not None:
+            self.neupl_ppo_policy_index = None
+            self.neupl_ppo_policy_embedding = neupl_ppo_policy_embedding.to(device).unsqueeze(0)
         if network is None:
-            self.network = agent_fn(self.num_actions, self.input_shape, device, hidden_size=hidden_size, **(neupl_ppo_kwargs or {})).to(device)
+            # Pass critic_observation_shape if using joint observations for critic
+            critic_obs_shape = self.joint_obs_shape if self.use_joint_obs_for_critic else None
+            self.network = agent_fn(self.num_actions, self.input_shape, device, hidden_size=hidden_size, critic_observation_shape=critic_obs_shape, **(neupl_ppo_kwargs or {})).to(device)
         else:
             self.network = network
-        self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
+
+        # Initialize optimizer
+        if optimizer_type == "adam":
+            self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
+        elif optimizer_type == "adamw":
+            self.optimizer = optim.AdamW(self.parameters(), lr=self.learning_rate, eps=1e-5)
+        else:
+            raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Must be 'adam' or 'adamw'.")
 
         # Initialize training buffers
         self.legal_actions_mask = torch.zeros(
@@ -371,6 +444,11 @@ class PPO(nn.Module):
         self.current_players = torch.zeros((self.steps_per_batch, self.num_envs)).to(
             device
         )
+        # Joint observations buffer (concatenation of both players' obs) for critic
+        if self.use_joint_obs_for_critic:
+            self.joint_obs = torch.zeros(
+                (self.steps_per_batch, self.num_envs, *self.joint_obs_shape)
+            ).to(device)
 
         # Initialize counters
         self.cur_batch_idx = 0
@@ -378,17 +456,49 @@ class PPO(nn.Module):
         self.updates_done = 0
         self.start_time = time.time()
 
-    def get_value(self, x):
-        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
-            return self.network.get_value(x, self.neupl_ppo_policy_index)
-        else:
-            return self.network.get_value(x)
+    def get_value(self, x, critic_obs=None):
+        """Get value estimate from critic.
 
-    def get_action_and_value(self, x, legal_actions_mask=None, action=None):
+        Args:
+            x: Actor observation (current player's observation)
+            critic_obs: Optional separate observation for critic. If use_joint_obs_for_critic
+                        is True and critic_obs is provided, uses critic_obs instead of x.
+        """
+        obs_for_critic = critic_obs if (self.use_joint_obs_for_critic and critic_obs is not None) else x
         if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
-            return self.network.get_action_and_value(x, policy_index=self.neupl_ppo_policy_index, legal_actions_mask=legal_actions_mask, action=action)
+            if self.neupl_ppo_policy_index is not None:
+                return self.network.get_value(obs_for_critic, policy_index=self.neupl_ppo_policy_index)
+            else:
+                return self.network.get_value(obs_for_critic, embedding=self.neupl_ppo_policy_embedding)
         else:
-            return self.network.get_action_and_value(x, legal_actions_mask, action)
+            return self.network.get_value(obs_for_critic)
+
+    def get_action_and_value(self, x, legal_actions_mask=None, action=None, critic_obs=None):
+        """Get action, log prob, entropy, value, and action probs.
+
+        Args:
+            x: Actor observation (current player's observation)
+            legal_actions_mask: Mask of legal actions
+            action: Optional action to evaluate (if None, samples new action)
+            critic_obs: Optional separate observation for critic. If use_joint_obs_for_critic
+                        is True and critic_obs is provided, uses critic_obs for value estimation.
+        """
+        obs_for_critic = critic_obs if (self.use_joint_obs_for_critic and critic_obs is not None) else x
+        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
+            assert (self.neupl_ppo_policy_index is not None) != (self.neupl_ppo_policy_embedding is not None), "Exactly one of neupl_ppo_policy_index or neupl_ppo_policy_embedding must be provided"
+            if self.neupl_ppo_policy_index is not None:
+                return self.network.get_action_and_value(x, policy_index=self.neupl_ppo_policy_index, legal_actions_mask=legal_actions_mask, action=action, critic_obs=obs_for_critic)
+            else:
+                return self.network.get_action_and_value(x, embedding=self.neupl_ppo_policy_embedding, legal_actions_mask=legal_actions_mask, action=action, critic_obs=obs_for_critic)
+        else:
+            return self.network.get_action_and_value(x, legal_actions_mask, action, critic_obs=obs_for_critic)
+
+    def set_policy_embedding(self, policy_embedding):
+        if isinstance(self.network, PPOConditionedOnPolicyRepresentationAgent):
+            # self.network.set_policy_embedding(policy_embedding)
+            self.neupl_ppo_policy_embedding = policy_embedding
+        else:
+            raise ValueError("Network is not a PPOConditionedOnPolicyRepresentationAgent")
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -443,9 +553,26 @@ class PPO(nn.Module):
                     [ts.current_player() for ts in time_step]
                 ).to(self.device)
 
-                action, logprob, _, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
+                # Build joint observation if needed (concatenation of both players' obs)
+                if self.use_joint_obs_for_critic:
+                    joint_obs = torch.Tensor(
+                        np.array(
+                            [
+                                np.concatenate([
+                                    np.reshape(ts.observations["info_state"][p], self.input_shape)
+                                    for p in range(self.num_players)
+                                ])
+                                for ts in time_step
+                            ]
+                        )
+                    ).to(self.device)
+                    action, logprob, _, value, probs = self.get_action_and_value(
+                        obs, legal_actions_mask=legal_actions_mask, critic_obs=joint_obs
+                    )
+                else:
+                    action, logprob, _, value, probs = self.get_action_and_value(
+                        obs, legal_actions_mask=legal_actions_mask
+                    )
 
                 # store
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
@@ -454,6 +581,8 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
+                if self.use_joint_obs_for_critic:
+                    self.joint_obs[self.cur_batch_idx] = joint_obs
 
                 agent_output = [
                     StepOutput(action=a.item(), probs=p)
@@ -469,6 +598,22 @@ class PPO(nn.Module):
         self.cur_batch_idx += 1
 
     def learn(self, time_step):
+        # note: we *should* store the embeddings/indices in time_step, but we don't. Instead, we rely on
+        # self.neupl_ppo_policy_index and self.neupl_ppo_policy_embedding to get the correct embedding/index.
+        # So ensure that the embedding/index isn't changed between playing and calling learn.
+
+        # Handle partial batches (when called before batch is full)
+        actual_steps_per_batch = self.cur_batch_idx
+        if actual_steps_per_batch < self.steps_per_batch:
+            # print(f"[PPO.learn] Alert: Learning with partial batch ({actual_steps_per_batch}/{self.steps_per_batch} steps)")
+            pass
+        if actual_steps_per_batch == 0:
+            print("[PPO.learn] Warning: No steps in batch, skipping learn")
+            return None
+
+        actual_batch_size = self.num_envs * actual_steps_per_batch
+        actual_minibatch_size = max(1, actual_batch_size // self.num_minibatches)
+
         next_obs = torch.Tensor(
             np.array(
                 [
@@ -481,16 +626,32 @@ class PPO(nn.Module):
             )
         ).to(self.device)
 
+        # Build next joint observation if needed
+        if self.use_joint_obs_for_critic:
+            next_joint_obs = torch.Tensor(
+                np.array(
+                    [
+                        np.concatenate([
+                            np.reshape(ts.observations["info_state"][p], self.input_shape)
+                            for p in range(self.num_players)
+                        ])
+                        for ts in time_step
+                    ]
+                )
+            ).to(self.device)
+        else:
+            next_joint_obs = None
+
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = self.get_value(next_obs).reshape(1, -1)
+            next_value = self.get_value(next_obs, critic_obs=next_joint_obs).reshape(1, -1)
             if self.gae:
-                advantages = torch.zeros_like(self.rewards).to(self.device)
+                advantages = torch.zeros((actual_steps_per_batch, self.num_envs)).to(self.device)
                 lastgaelam = 0
-                for t in reversed(range(self.steps_per_batch)):
+                for t in reversed(range(actual_steps_per_batch)):
                     nextvalues = (
                         next_value
-                        if t == self.steps_per_batch - 1
+                        if t == actual_steps_per_batch - 1
                         else self.values[t + 1]
                     )
                     nextnonterminal = 1.0 - self.dones[t]
@@ -503,43 +664,52 @@ class PPO(nn.Module):
                         delta
                         + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
                     )
-                returns = advantages + self.values
+                returns = advantages + self.values[:actual_steps_per_batch]
             else:
-                returns = torch.zeros_like(self.rewards).to(self.device)
-                for t in reversed(range(self.steps_per_batch)):
+                returns = torch.zeros((actual_steps_per_batch, self.num_envs)).to(self.device)
+                for t in reversed(range(actual_steps_per_batch)):
                     next_return = (
-                        next_value if t == self.steps_per_batch - 1 else returns[t + 1]
+                        next_value if t == actual_steps_per_batch - 1 else returns[t + 1]
                     )
                     nextnonterminal = 1.0 - self.dones[t]
                     returns[t] = (
                         self.rewards[t] + self.gamma * nextnonterminal * next_return
                     )
-                advantages = returns - self.values
+                advantages = returns - self.values[:actual_steps_per_batch]
 
-        # flatten the batch
-        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
-        b_obs = self.obs.reshape((-1,) + self.input_shape)
-        b_logprobs = self.logprobs.reshape(-1)
-        b_actions = self.actions.reshape(-1)
+        # flatten the batch (only use first actual_steps_per_batch elements)
+        b_legal_actions_mask = self.legal_actions_mask[:actual_steps_per_batch].reshape((-1, self.num_actions))
+        b_obs = self.obs[:actual_steps_per_batch].reshape((-1,) + self.input_shape)
+        b_logprobs = self.logprobs[:actual_steps_per_batch].reshape(-1)
+        b_actions = self.actions[:actual_steps_per_batch].reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
-        b_values = self.values.reshape(-1)
-        b_playersigns = -2.0 * self.current_players.reshape(-1) + 1.0
+        b_values = self.values[:actual_steps_per_batch].reshape(-1)
+        b_playersigns = -2.0 * self.current_players[:actual_steps_per_batch].reshape(-1) + 1.0
+        # b_playersigns *= -1.0 # flip the sign to see if it becomes bad -- It does!
         b_advantages *= b_playersigns
 
+        # Flatten joint observations if using joint obs for critic
+        if self.use_joint_obs_for_critic:
+            b_joint_obs = self.joint_obs[:actual_steps_per_batch].reshape((-1,) + self.joint_obs_shape)
+        else:
+            b_joint_obs = None
+
         # Optimizing the policy and value network
-        b_inds = np.arange(self.batch_size)
+        b_inds = np.arange(actual_batch_size)
         clipfracs = []
         for _ in range(self.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, self.batch_size, self.minibatch_size):
+            for start in range(0, actual_batch_size, actual_minibatch_size):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
+                mb_joint_obs = b_joint_obs[mb_inds] if b_joint_obs is not None else None
                 _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
+                    critic_obs=mb_joint_obs,
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
@@ -588,8 +758,9 @@ class PPO(nn.Module):
                 )
 
                 self.optimizer.zero_grad()
+                # breakpoint()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
             if self.target_kl is not None:
@@ -620,6 +791,17 @@ class PPO(nn.Module):
         # Update counters
         self.updates_done += 1
         self.cur_batch_idx = 0
+
+        # Return training metrics
+        return {
+            "value_loss": v_loss.item(),
+            "policy_loss": pg_loss.item(),
+            "entropy": entropy_loss.item(),
+            "approx_kl": approx_kl.item(),
+            "clipfrac": np.mean(clipfracs),
+            "explained_variance": explained_var,
+            "grad_norm": grad_norm.item(),
+        }
 
     def save(self, path):
         """Saves the actor weights to path"""

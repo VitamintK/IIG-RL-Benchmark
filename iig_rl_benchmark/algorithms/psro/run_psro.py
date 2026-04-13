@@ -25,11 +25,13 @@ script with:
 The other parameters keeping their default values.
 """
 
+import json
 import time
 
 import numpy as np
 
 # pylint: disable=g-bad-import-order
+from omegaconf import OmegaConf
 import pyspiel
 
 from open_spiel.python import policy
@@ -233,7 +235,7 @@ class RunPSRO:
             "neupl_ppo_kwargs": {
                 # "num_policies": self.args.total_num_policies,
                 # "policy_embedding_size": self.args.policy_embedding_size,
-                "num_policies": 100,
+                "num_policies": self.args.num_policies,
                 "policy_embedding_size": 64,
             },
             "device": self.meta_args.device,
@@ -254,7 +256,7 @@ class RunPSRO:
             )
             for player_id in range(2)
         ]
-        agents = [[agent_class(env, player_id, network=agents[player_id]._policy.agent.network, neupl_ppo_policy_index=i, **agent_kwargs) for i in range(100)] for player_id in range(2)]
+        agents = [[agent_class(env, player_id, network=agents[player_id]._policy.agent.network, neupl_ppo_policy_index=i, **agent_kwargs) for i in range(self.args.num_policies)] for player_id in range(2)]
         agents[0][0] = rl_policy.UniformRandomAgentPolicy(env, 0, num_actions=num_actions)
         agents[1][0] = rl_policy.UniformRandomAgentPolicy(env, 1, num_actions=num_actions)
         for player_agents in agents:
@@ -321,7 +323,7 @@ class RunPSRO:
             g_psro_solver = neupl.NeuplSolver(
                 env.game,
                 oracle,
-                total_num_policies=100,
+                total_num_policies=self.args.num_policies,
                 initial_policies=agents,
                 training_strategy_selector=training_strategy_selector,
                 rectifier=args.rectifier,
@@ -330,6 +332,7 @@ class RunPSRO:
                 meta_strategy_method=args.meta_strategy_method,
                 sample_from_marginals=sample_from_marginals,
                 symmetric_game=args.symmetric_game,
+                use_randall_loss=args.use_randall_loss,
             )
         else:
             g_psro_solver = psro.PSROSolver(
@@ -423,6 +426,8 @@ class RunPSRO:
             self.save_psro_policies(
                 g_psro_solver, self.meta_args.experiment_dir, gpsro_iteration + 1
             )
+            with open(self.meta_args.experiment_dir + f"/config.json", "w") as f:
+                json.dump(OmegaConf.to_container(self.args, resolve=True), f)
             gpsro_iteration += 1
 
         # self.policies = policies
